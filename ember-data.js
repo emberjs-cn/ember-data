@@ -1,4 +1,4 @@
-// Last commit: 68051c9 (2013-09-03 22:13:07 -0700)
+// Last commit: b4f98fe (2013-09-05 11:44:41 -0700)
 
 
 (function() {
@@ -54,7 +54,7 @@ var define, requireModule;
 
 if ('undefined' === typeof DS) {
   DS = Ember.Namespace.create({
-    VERSION: '1.0.0-beta.1'
+    VERSION: '1.0.0-beta.2'
   });
 
   if ('undefined' !== typeof window) {
@@ -79,63 +79,25 @@ function aliasMethod(methodName) {
 DS.JSONSerializer = Ember.Object.extend({
   primaryKey: 'id',
 
-  deserialize: function(type, data) {
-    var store = get(this, 'store');
-
+  applyTransforms: function(type, data) {
     type.eachTransformedAttribute(function(key, type) {
       var transform = this.transformFor(type);
       data[key] = transform.deserialize(data[key]);
     }, this);
 
-    type.eachRelationship(function(key, relationship) {
-      // A link (usually a URL) was already provided in
-      // normalized form
-      if (data.links && data.links[key]) {
-        return;
-      }
-
-      var type = relationship.type,
-          value = data[key];
-
-      if (value == null) { return; }
-
-      if (relationship.kind === 'belongsTo') {
-        this.deserializeRecordId(data, key, relationship, value);
-      } else if (relationship.kind === 'hasMany') {
-        this.deserializeRecordIds(data, key, relationship, value);
-      }
-    }, this);
-
     return data;
   },
 
-  deserializeRecordId: function(data, key, relationship, id) {
-    if (isNone(id) || id instanceof DS.Model) {
-      return;
-    }
+  normalize: function(type, hash) {
+    if (!hash) { return hash; }
 
-    var type;
-
-    if (typeof id === 'number' || typeof id === 'string') {
-      type = this.typeFor(relationship, key, data);
-      data[key] = get(this, 'store').recordForId(type, id);
-    } else if (typeof id === 'object') {
-      // polymorphic
-      data[key] = get(this, 'store').recordForId(id.type, id.id);
-    }
-  },
-
-  deserializeRecordIds: function(data, key, relationship, ids) {
-    for (var i=0, l=ids.length; i<l; i++) {
-      this.deserializeRecordId(ids, i, relationship, ids[i]);
-    }
+    this.applyTransforms(type, hash);
+    return hash;
   },
 
   // SERIALIZE
 
   serialize: function(record, options) {
-    var store = get(this, 'store');
-
     var json = {};
 
     if (options && options.includeId) {
@@ -224,11 +186,11 @@ DS.JSONSerializer = Ember.Object.extend({
   extractSave: aliasMethod('extractSingle'),
 
   extractSingle: function(store, type, payload) {
-    return payload;
+    return this.normalize(type, payload);
   },
 
   extractArray: function(store, type, payload) {
-    return payload;
+    return this.normalize(type, payload);
   },
 
   extractMeta: function(store, type, payload) {
@@ -2024,6 +1986,9 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
   */
   didSaveRecord: function(record, data) {
     if (data) {
+      // normalize relationship IDs into records
+      data = normalizeRelationships(this, record.constructor, data);
+
       this.updateId(record, data);
     }
 
@@ -2115,14 +2080,15 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
     @method _load
     @private
     @param {DS.Model} type
-    @param data
-    @param prematerialized
+    @param {Object} data
+    @param {Boolean} partial the data should be merged into
+      the existing fata, not replace it.
   */
-  _load: function(type, data) {
+  _load: function(type, data, partial) {
     var id = coerceId(data.id),
         record = this.recordForId(type, id);
 
-    record.setupData(data);
+    record.setupData(data, partial);
     this.recordArrayManager.recordDidChange(record);
 
     return record;
@@ -2212,15 +2178,24 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
     @returns DS.Model the record that was created or
       updated.
   */
-  push: function(type, data) {
+  push: function(type, data, _partial) {
+    // _partial is an internal param used by `update`.
+    // If passed, it means that the data should be
+    // merged into the existing data, not replace it.
+
     var serializer = this.serializerFor(type);
     type = this.modelFor(type);
 
-    data = serializer.deserialize(type, data);
+    // normalize relationship IDs into records
+    data = normalizeRelationships(this, type, data);
 
-    this._load(type, data);
+    this._load(type, data, _partial);
 
     return this.recordForId(type, data.id);
+  },
+
+  update: function(type, data) {
+    return this.push(type, data, true);
   },
 
   /**
@@ -2270,9 +2245,12 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
 
     Ember.assert('The id ' + id + ' has already been used with another record of type ' + type.toString() + '.', !id || !idToRecord[id]);
 
+    // lookupFactory should really return an object that creates
+    // instances with the injections applied
     var record = type._create({
       id: id,
       store: this,
+      container: this.container
     });
 
     if (data) {
@@ -2417,6 +2395,59 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
     return serializerFor(this.container, type.typeKey, adapter && adapter.defaultSerializer);
   }
 });
+
+function normalizeRelationships(store, type, data) {
+  type.eachRelationship(function(key, relationship) {
+    // A link (usually a URL) was already provided in
+    // normalized form
+    if (data.links && data.links[key]) {
+      return;
+    }
+
+    var type = relationship.type,
+        value = data[key];
+
+    if (value == null) { return; }
+
+    if (relationship.kind === 'belongsTo') {
+      deserializeRecordId(store, data, key, relationship, value);
+    } else if (relationship.kind === 'hasMany') {
+      deserializeRecordIds(store, data, key, relationship, value);
+    }
+  });
+
+  return data;
+}
+
+function deserializeRecordId(store, data, key, relationship, id) {
+  if (isNone(id) || id instanceof DS.Model) {
+    return;
+  }
+
+  var type;
+
+  if (typeof id === 'number' || typeof id === 'string') {
+    type = typeFor(relationship, key, data);
+    data[key] = store.recordForId(type, id);
+  } else if (typeof id === 'object') {
+    // polymorphic
+    data[key] = store.recordForId(id.type, id.id);
+  }
+}
+
+function typeFor(relationship, key, data) {
+  if (relationship.options.polymorphic) {
+    return data[key + "_type"];
+  } else {
+    return relationship.type;
+  }
+}
+
+function deserializeRecordIds(store, data, key, relationship, ids) {
+  for (var i=0, l=ids.length; i<l; i++) {
+    deserializeRecordId(store, ids, i, relationship, ids[i]);
+  }
+}
 
 // Delegation to the adapter and promise management
 
@@ -3291,7 +3322,8 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
     @returns {Object} A JSON representation of the object.
   */
   toJSON: function(options) {
-    var serializer = DS.JSONSerializer.create();
+    // container is for lazy transform lookups
+    var serializer = DS.JSONSerializer.create({ container: this.container });
     return serializer.serialize(this, options);
   },
 
@@ -3537,8 +3569,12 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
     Ember.run.once(this, this.updateRecordArrays);
   },
 
-  setupData: function(data) {
-    this._data = data;
+  setupData: function(data, partial) {
+    if (partial) {
+      Ember.merge(this._data, data);
+    } else {
+      this._data = data;
+    }
 
     var relationships = this._relationships;
 
@@ -4413,14 +4449,21 @@ var get = Ember.get, set = Ember.set,
 function asyncBelongsTo(type, options, meta) {
   return Ember.computed(function(key, value) {
     var data = get(this, 'data'),
-        store = get(this, 'store');
+        store = get(this, 'store'),
+        belongsTo;
 
     if (arguments.length === 2) {
       Ember.assert("You can only add a '" + type + "' record to this relationship", !value || value instanceof store.modelFor(type));
       return value === undefined ? null : value;
     }
 
-    return !isNone(data[key]) ? store.fetchRecord(data[key]) : null;
+    belongsTo = data[key];
+
+    if(!isNone(belongsTo) && get(belongsTo, 'isEmpty')) {
+      return store.fetchRecord(belongsTo);
+    } else {
+      return null;
+    }
   }).property('data').meta(meta);
 }
 
@@ -4624,7 +4667,7 @@ DS.Model.reopen({
     being defined. So, for example, when the user does this:
 
       DS.Model.extend({
-        parent: DS.belongsTo(App.User)
+        parent: DS.belongsTo('user')
       });
 
     This hook would be called with "parent" as the key and the computed
@@ -4678,7 +4721,7 @@ DS.Model.reopenClass({
     For example, if you define a model like this:
 
         App.Post = DS.Model.extend({
-          comments: DS.hasMany(App.Comment)
+          comments: DS.hasMany('comment')
         });
 
     Calling `App.Post.typeForRelationship('comments')` will return `App.Comment`.
@@ -4752,9 +4795,9 @@ DS.Model.reopenClass({
     For example, given the following model definition:
 
         App.Blog = DS.Model.extend({
-          users: DS.hasMany(App.User),
-          owner: DS.belongsTo(App.User),
-          posts: DS.hasMany(App.Post)
+          users: DS.hasMany('user'),
+          owner: DS.belongsTo('user'),
+          posts: DS.hasMany('post')
         });
 
     This computed property would return a map describing these
@@ -4802,10 +4845,10 @@ DS.Model.reopenClass({
     definition:
 
         App.Blog = DS.Model.extend({
-          users: DS.hasMany(App.User),
-          owner: DS.belongsTo(App.User),
+          users: DS.hasMany('user'),
+          owner: DS.belongsTo('user'),
 
-          posts: DS.hasMany(App.Post)
+          posts: DS.hasMany('post')
         });
 
     This property would contain the following:
@@ -4841,9 +4884,10 @@ DS.Model.reopenClass({
     For example, given a model with this definition:
 
         App.Blog = DS.Model.extend({
-          users: DS.hasMany(App.User),
-          owner: DS.belongsTo(App.User),
-          posts: DS.hasMany(App.Post)
+          users: DS.hasMany('user'),
+          owner: DS.belongsTo('user'),
+  
+          posts: DS.hasMany('post')
         });
 
     This property would contain the following:
@@ -4891,10 +4935,10 @@ DS.Model.reopenClass({
     definition:
 
         App.Blog = DS.Model.extend({
-          users: DS.hasMany(App.User),
-          owner: DS.belongsTo(App.User),
+          users: DS.hasMany('user'),
+          owner: DS.belongsTo('user'),
 
-          posts: DS.hasMany(App.Post)
+          posts: DS.hasMany('post')
         });
 
     This property would contain the following:
@@ -4937,10 +4981,10 @@ DS.Model.reopenClass({
     For example:
 
         App.Blog = DS.Model.extend({
-          users: DS.hasMany(App.User),
-          owner: DS.belongsTo(App.User),
+          users: DS.hasMany('user'),
+          owner: DS.belongsTo('user'),
 
-          posts: DS.hasMany(App.Post),
+          posts: DS.hasMany('post'),
 
           title: DS.attr('string')
         });
@@ -5327,8 +5371,8 @@ DS.Adapter = Ember.Object.extend(DS._Mappable, {
     The `find()` method is invoked when the store is asked for a record that
     has not previously been loaded. In response to `find()` being called, you
     should query your persistence layer for a record with the given ID. Once
-    found, you can asynchronously call the store's `load()` method to load
-    the record.
+    found, you can asynchronously call the store's `push()` method to push
+    the record into the store.
 
     Here is an example `find` implementation:
 
@@ -5339,8 +5383,8 @@ DS.Adapter = Ember.Object.extend(DS._Mappable, {
           jQuery.getJSON(url, function(data) {
               // data is a hash of key/value pairs. If your server returns a
               // root, simply do something like:
-              // store.load(type, id, data.person)
-              store.load(type, id, data);
+              // store.push(type, id, data.person)
+              store.push(type, id, data);
           });
         }
 
@@ -5892,7 +5936,7 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
     @param {Object} hash
     @returns Object
   */
-  normalize: function(type, prop, hash) {
+  normalize: function(type, hash, prop) {
     this.normalizeId(hash);
     this.normalizeUsingDeclaredMapping(type, hash);
     this.normalizeAttributes(type, hash);
@@ -5902,7 +5946,32 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
       return this.normalizeHash[prop](hash);
     }
 
-    return hash;
+    return this._super(type, hash, prop);
+  },
+
+  /**
+    You can use this method to normalize all payloads, regardless of whether they
+    represent single records or an array.
+
+    For example, you might want to remove some extraneous data from the payload:
+
+    ```js
+    App.ApplicationSerializer = DS.RESTSerializer.extend({
+      normalizePayload: function(type, payload) {
+        delete payload.version;
+        delete payload.status;
+        return payload;
+      }
+    });
+    ```
+
+    @method normalizePayload
+    @param {subclass of DS.Model} type
+    @param {Object} hash
+    @returns Object the normalized payload
+  */
+  normalizePayload: function(type, payload) {
+    return payload;
   },
 
   /**
@@ -6048,13 +6117,15 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
     @returns Object the primary response to the original request
   */
   extractSingle: function(store, primaryType, payload, recordId, requestType) {
+    payload = this.normalizePayload(primaryType, payload);
+
     var primaryTypeName = primaryType.typeKey,
         primaryRecord;
 
     for (var prop in payload) {
       // legacy support for singular names
       if (prop === primaryTypeName) {
-        primaryRecord = this.normalize(primaryType, prop, payload[prop]);
+        primaryRecord = this.normalize(primaryType, payload[prop], prop);
         continue;
       }
 
@@ -6063,7 +6134,7 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
 
       /*jshint loopfunc:true*/
       forEach.call(payload[prop], function(hash) {
-        hash = this.normalize(type, prop, hash);
+        hash = this.normalize(type, hash, prop);
 
         var isFirstCreatedRecord = typeName === primaryTypeName && !recordId && !primaryRecord,
             isUpdatedRecord = typeName === primaryTypeName && coerceId(hash.id) === recordId;
@@ -6181,6 +6252,8 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
       to the original query.
   */
   extractArray: function(store, primaryType, payload) {
+    payload = this.normalizePayload(primaryType, payload);
+
     var primaryTypeName = primaryType.typeKey,
         primaryArray;
 
@@ -6191,7 +6264,7 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
 
       /*jshint loopfunc:true*/
       var normalizedArray = payload[prop].map(function(hash) {
-        return this.normalize(type, prop, hash);
+        return this.normalize(type, hash, prop);
       }, this);
 
       if (isPrimary) {
@@ -6693,11 +6766,8 @@ DS.RESTAdapter = DS.Adapter.extend({
   /**
     Builds a URL for a given type and optional ID.
 
-    By default, it pluralizes the type's name (for example,
-    'post' becomes 'posts' and 'person' becomes 'people').
-
-    If an ID is specified, it adds the ID to the plural form
-    of the type, separated by a `/`.
+    If an ID is specified, it adds the ID to the root generated
+    for the type, separated by a `/`.
 
     @method buildURL
     @param {String} type
@@ -6712,13 +6782,41 @@ DS.RESTAdapter = DS.Adapter.extend({
     if (host) { url.push(host); }
     if (namespace) { url.push(namespace); }
 
-    url.push(Ember.String.pluralize(type));
+    url.push(this.rootForType(type));
     if (id) { url.push(id); }
 
     url = url.join('/');
     if (!host) { url = '/' + url; }
 
     return url;
+  },
+
+  /**
+    Determines the pathname root for a given type.
+
+    By default, it pluralizes the type's name (for example,
+    'post' becomes 'posts' and 'person' becomes 'people').
+
+    ### Pathname root customization
+
+    For example if you have an object LineItem with an
+    endpoint of "/line_items/".
+
+    ```js
+    DS.RESTAdapter.reopen({
+      rootForType: function(type) {
+        var decamelized = Ember.String.decamelize(type);
+        return Ember.String.pluralize(decamelized);
+      };
+    });
+    ```
+
+    @method rootForType
+    @param {String} type
+    @returns String
+  **/
+  rootForType: function(type) {
+    return Ember.String.pluralize(type);
   },
 
   /**
