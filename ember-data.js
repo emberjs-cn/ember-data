@@ -1,5 +1,14 @@
-// Version: v1.0.0-beta.1-161-g95724b8
-// Last commit: 95724b8 (2013-09-09 21:13:39 -0700)
+// ==========================================================================
+// Project:   Ember Data
+// Copyright: ©2011-2012 Tilde Inc. and contributors.
+//            Portions ©2011 Living Social Inc. and contributors.
+// License:   Licensed under MIT license (see license.js)
+// ==========================================================================
+
+
+
+// Version: v1.0.0-beta.1-176-gddaa5fa
+// Last commit: ddaa5fa (2013-09-11 19:29:55 -0700)
 
 
 (function() {
@@ -149,13 +158,16 @@ DS.JSONSerializer = Ember.Object.extend({
 
     var belongsTo = get(record, key);
 
-    if (isNone(belongsTo)) { return; }
-
     key = this.keyForRelationship ? this.keyForRelationship(key, "belongsTo") : key;
-    json[key] = get(belongsTo, 'id');
+
+    if (isNone(belongsTo)) {
+      json[key] = belongsTo;
+    } else {
+      json[key] = get(belongsTo, 'id');
+    }
 
     if (relationship.options.polymorphic) {
-      json[key + "_type"] = belongsTo.constructor.typeKey;
+      this.serializePolymorphicType(record, json, relationship);
     }
   },
 
@@ -169,6 +181,11 @@ DS.JSONSerializer = Ember.Object.extend({
       // TODO support for polymorphic manyToNone and manyToMany relationships
     }
   },
+
+  /**
+    You can use this method to customize how polymorphic objects are serialized.
+  */
+  serializePolymorphicType: Ember.K,
 
   // EXTRACT
 
@@ -1827,6 +1844,24 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
 
     typeMap.findAllCache = array;
     return array;
+  },
+
+
+  /**
+    This method unloads all of the known records for a given type.
+
+    @method unloadAll
+    @param {Class} type
+  */
+  unloadAll: function(type) {
+    type = this.modelFor(type);
+
+    var typeMap = this.typeMapFor(type),
+        records = typeMap.records, record;
+
+    while(record = records.pop()) {
+      record.unloadRecord();
+    }
   },
 
   /**
@@ -4662,7 +4697,10 @@ function hasRelationship(type, options) {
 }
 
 DS.hasMany = function(type, options) {
-  Ember.assert("The type passed to DS.hasMany must be defined", !!type);
+  if (typeof type === 'object') {
+    options = type;
+    type = undefined;
+  }
   return hasRelationship(type, options);
 };
 
@@ -4996,6 +5034,9 @@ DS.Model.reopenClass({
         meta.key = name;
         type = meta.type;
 
+        if (!type) {
+          type = Ember.String.singularize(name);
+        }
         if (typeof type === 'string') {
           meta.type = this.store.modelFor(type);
         }
@@ -6537,8 +6578,45 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
     return this._super.apply(this, arguments);
   },
 
+  /**
+    You can use this method to customize the root keys serialized into the JSON.
+    By default the REST Serializer sends camelized root keys.
+    For example, your server may expect underscored root objects.
+
+    ```js
+    App.ApplicationSerializer = DS.RESTSerializer.extend({
+      serializeIntoHash: function(data, type, record, options) {
+        var root = Ember.String.decamelize(type.typeKey);
+        data[root] = this.serialize(record, options);
+      }
+    });
+    ```
+
+    @method serializeIntoHash
+    @param {Object} hash
+    @param {subclass of DS.Model} type
+    @param {DS.Model} record
+    @param {Object} options
+  */
   serializeIntoHash: function(hash, type, record, options) {
     hash[type.typeKey] = this.serialize(record, options);
+  },
+
+  /**
+    You can use this method to customize how polymorphic objects are serialized.
+    By default the JSON Serializer creates the key by appending `_type` to
+    the attribute and value from the model's camelcased model name.
+
+    @method serializePolymorphicType
+    @param {DS.Model} record
+    @param {Object} json
+    @param relationship
+  */
+  serializePolymorphicType: function(record, json, relationship) {
+    var key = relationship.key,
+        belongsTo = get(record, key);
+    key = this.keyForAttribute ? this.keyForAttribute(key) : key;
+    json[key + "_type"] = belongsTo.constructor.typeKey;
   }
 });
 
@@ -7150,6 +7228,64 @@ function loadIrregular(rules, irregularPairs) {
   }
 }
 
+/**
+  Inflector.Ember provides a mechanism for supplying inflection rules for your
+  application. Ember includes a default set of inflection rules, and provides an
+  API for providing additional rules.
+
+  Examples:
+
+  Creating an inflector with no rules.
+
+  ```js
+  var inflector = new Ember.Inflector();
+  ```
+
+  Creating an inflector with the default ember ruleset.
+
+  ```js
+  var inflector = new Ember.Inflector(Ember.Inflector.defaultRules);
+
+  inflector.pluralize('cow') //=> 'kine'
+  inflector.singularize('kine') //=> 'cow'
+  ```
+
+  Creating an inflector and adding rules later.
+
+  ```javascript
+  var inflector = Ember.Inflector.inflector;
+
+  inflector.pluralize('advice') // => 'advices'
+  inflector.uncountable('advice');
+  inflector.pluralize('advice') // => 'advice'
+
+  inflector.pluralize('formula') // => 'formulas'
+  inflector.irregular('formula', 'formulae');
+  inflector.pluralize('formula') // => 'formulae'
+
+  // you would not need to add these as they are the default rules
+  inflector.plural(/$/, 's');
+  inflector.singular(/s$/i, '');
+  ```
+
+  Creating an inflector with a nondefault ruleset.
+
+  ```javascript
+  var rules = {
+    plurals:  [ /$/, 's' ],
+    singular: [ /\s$/, '' ],
+    irregularPairs: [
+      [ 'cow', 'kine' ]
+    ],
+    uncountable: [ 'fish' ]
+  };
+
+  var inflector = new Ember.Inflector(rules);
+  ```
+
+  @class Inflector
+  @namespace Ember
+*/
 function Inflector(ruleSet) {
   ruleSet = ruleSet || {};
   ruleSet.uncountable = ruleSet.uncountable || {};
@@ -7168,14 +7304,62 @@ function Inflector(ruleSet) {
 }
 
 Inflector.prototype = {
+  /**
+    @method plural
+    @param {RegExp} regex
+    @param {String} string
+  */
+  plural: function(regex, string) {
+    this.rules.plurals.push([regex, string]);
+  },
+
+  /**
+    @method singular
+    @param {RegExp} regex
+    @param {String} string
+  */
+  singular: function(regex, string) {
+    this.rules.singular.push([regex, string]);
+  },
+
+  /**
+    @method uncountable
+    @param {String} regex
+  */
+  uncountable: function(string) {
+    loadUncountable(this.rules, [string]);
+  },
+
+  /**
+    @method irregular
+    @param {String} singular
+    @param {String} plural
+  */
+  irregular: function (singular, plural) {
+    loadIrregular(this.rules, [[singular, plural]]);
+  },
+
+  /**
+    @method pluralize
+    @param {String} word
+  */
   pluralize: function(word) {
     return this.inflect(word, this.rules.plurals);
   },
 
+  /**
+    @method singularize
+    @param {String} word
+  */
   singularize: function(word) {
     return this.inflect(word, this.rules.singular);
   },
 
+  /**
+    @method inflect
+    @param {String} word
+    @param {Object} typeRules
+  */
   inflect: function(word, typeRules) {
     var inflection, substitution, result, lowercase, isBlank,
     isUncountable, isIrregular, isIrregularInverse, rule;
