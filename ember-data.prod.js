@@ -7,8 +7,8 @@
 
 
 
-// Version: v1.0.0-beta.1-176-gddaa5fa
-// Last commit: ddaa5fa (2013-09-11 19:29:55 -0700)
+// Version: v1.0.0-beta.1-182-g5bbad42
+// Last commit: 5bbad42 (2013-09-12 18:54:37 -0700)
 
 
 (function() {
@@ -1919,6 +1919,18 @@ DS.Store = Ember.Object.extend(DS._Mappable, {
   recordIsLoaded: function(type, id) {
     if (!this.hasRecordForId(type, id)) { return false; }
     return !get(this.recordForId(type, id), 'isEmpty');
+  },
+
+  /**
+    This method returns the metadata for a specific type.
+
+    @method metadataFor
+    @param {string} type
+    @return {object}
+  */
+  metadataFor: function(type) {
+    type = this.modelFor(type);
+    return this.typeMapFor(type).metadata;
   },
 
   // ............
@@ -7506,6 +7518,142 @@ if (Ember.EXTEND_PROTOTYPES) {
 
 (function() {
 Ember.Inflector.inflector = new Ember.Inflector(Ember.Inflector.defaultRules);
+
+})();
+
+
+
+(function() {
+
+})();
+
+(function() {
+/**
+  @module ember-data
+*/
+
+var get = Ember.get, isNone = Ember.isNone;
+
+DS.ActiveModelSerializer = DS.RESTSerializer.extend({
+  keyForAttribute: function(attr) {
+    return Ember.String.decamelize(attr);
+  },
+
+  keyForRelationship: function(key, kind) {
+    key = Ember.String.decamelize(key);
+    if (kind === "belongsTo") {
+      return key + "_id";
+    } else if (kind === "hasMany") {
+      return Ember.String.singularize(key) + "_ids";
+    } else {
+      return key;
+    }
+  },
+
+  serializeHasMany: Ember.K,
+
+  serializeIntoHash: function(data, type, record, options) {
+    var root = this.rootForType(type.typeKey);
+    data[root] = this.serialize(record, options);
+  },
+
+  rootForType: function(type) {
+    return Ember.String.decamelize(type);
+  },
+
+  typeForRoot: function(root) {
+    var camelized = Ember.String.camelize(root);
+    return Ember.String.singularize(camelized);
+  },
+
+  serializePolymorphicType: function(record, json, relationship) {
+    var key = relationship.key,
+        belongsTo = get(record, key);
+    key = this.keyForAttribute(key);
+    json[key + "_type"] = Ember.String.capitalize(belongsTo.constructor.typeKey);
+  }
+});
+
+
+})();
+
+
+
+(function() {
+/**
+  @module ember-data
+*/
+
+/**
+  The ActiveModelAdapter is a subclass of the RESTAdapter designed to integrate
+  with a JSON API that uses an underscored naming convention instead of camelcasing.
+  It has been designed to work out of the box with the
+  [active_model_serializers](http://github.com/rails-api/active_model_serializers)
+  Ruby gem.
+
+  ## JSON Structure
+
+  The ActiveModelAdapter expects the JSON returned from your server to follow
+  the REST adapter conventions substituting underscored keys for camelcased ones.
+
+  ### Conventional Names
+
+  Attribute names in your JSON payload should be the underscored versions of
+  the attributes in your Ember.js models.
+
+  For example, if you have a `Person` model:
+
+  ```js
+  App.FamousPerson = DS.Model.extend({
+    firstName: DS.attr('string'),
+    lastName: DS.attr('string'),
+    occupation: DS.attr('string')
+  });
+  ```
+
+  The JSON returned should look like this:
+
+  ```js
+  {
+    "famous_person": {
+      "first_name": "Barack",
+      "last_name": "Obama",
+      "occupation": "President"
+    }
+  }
+  ```
+
+  @class ActiveModelAdapter
+  @constructor
+  @namespace DS
+  @extends DS.Adapter
+**/
+
+DS.ActiveModelAdapter = DS.RESTAdapter.extend({
+  defaultSerializer: '_ams',
+  /**
+    The ActiveModelAdapter overrides the `pathForType` method
+    to build underscored URLs.
+
+    ```js
+      this.pathForType("famousPerson");
+      //=> "famous_people"
+    ```
+
+    @method pathForType
+    @param {String} type
+    @returns String
+  */
+  pathForType: function(type) {
+    var decamelized = Ember.String.decamelize(type);
+    return Ember.String.pluralize(decamelized);
+  }
+});
+})();
+
+
+
+(function() {
 
 })();
 
